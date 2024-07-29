@@ -1,119 +1,30 @@
+import os
+import random
 import requests
-import numpy as np
-from PIL import Image
-import matplotlib.pyplot as plt
-import matplotlib.colors as mcolors
-import srtm
-from io import BytesIO
-
-# Initialize the SRTM data fetcher
-elevation_data = srtm.get_data()
-
-def get_elevation(lat, lon):
-    """Get elevation for the given latitude and longitude."""
-    try:
-        elevation = elevation_data.get_elevation(lat, lon)
-        return elevation if elevation is not None else "Elevation data not available."
-    except Exception as e:
-        return f"Error: {e}"
-
-def lonlat_to_tilexy(lat, lon, zoom):
-    """Convert latitude and longitude to tile x, y coordinates."""
-    lat_rad = np.radians(lat)
-    n = 2 ** zoom
-    x = int((lon + 180) / 360 * n)
-    y = int((1 - np.log(np.tan(lat_rad) + 1 / np.cos(lat_rad)) / np.pi) / 2 * n)
-    return x, y
-
-def fetch_image_from_arcgis(lat, lon, zoom):
-    """Fetch an image tile from the ArcGIS server."""
-    x, y = lonlat_to_tilexy(lat, lon, zoom)
-    url = f"https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{zoom}/{y}/{x}"
-    try:
-        response = requests.get(url, timeout=10)
-        response.raise_for_status()
-        return Image.open(BytesIO(response.content))
-    except requests.RequestException as e:
-        print(f"Error fetching image: {e}")
-        return None
-
-def fetch_elevation_data(lat, lon, zoom, tile_size=256):
-    """Fetch elevation data for the tile area."""
-    x, y = lonlat_to_tilexy(lat, lon, zoom)
-    bounds = tile_to_bounds(x, y, zoom)
-    lat_step = (bounds['n'] - bounds['s']) / tile_size
-    lon_step = (bounds['e'] - bounds['w']) / tile_size
-
-    elevation_grid = np.zeros((tile_size, tile_size))
-    for i in range(tile_size):
-        for j in range(tile_size):
-            lat_point = bounds['s'] + i * lat_step
-            lon_point = bounds['w'] + j * lon_step
-            elevation = get_elevation(lat_point, lon_point)
-            if isinstance(elevation, (int, float)):
-                elevation_grid[i, j] = elevation
-
-    return elevation_grid
-
-def tile_to_bounds(x, y, zoom):
-    """Convert tile x, y and zoom to geographic bounds."""
-    n = 2 ** zoom
-    lon_deg = x / n * 360 - 180
-    lat_deg = np.degrees(np.arctan(np.sinh(np.pi * (1 - 2 * y / n))))
-    return {
-        'w': lon_deg,
-        'e': lon_deg + 360 / n,
-        's': lat_deg,
-        'n': np.degrees(np.arctan(np.sinh(np.pi * (1 - 2 * (y + 1) / n))))
-    }
-
-def fetch_and_output_bboxes(lat, lon, zoom):
-    """Fetch map image and output bounding box coordinates."""
-    image = fetch_image_from_arcgis(lat, lon, zoom)
-    if image:
-        # Just fetch elevation data and print bounding box coordinates
-        bounds = tile_to_bounds(lonlat_to_tilexy(lat, lon, zoom)[0], lonlat_to_tilexy(lat, lon, zoom)[1], zoom)
-        print(f"Bounding Box Coordinates:")
-        print(f"West: {bounds['w']}")
-        print(f"East: {bounds['e']}")
-        print(f"South: {bounds['s']}")
-        print(f"North: {bounds['n']}")
-    else:
-        print("Failed to fetch the map image.")
-
-# Example usage
-if __name__ == "__main__":
-    lat, lon, zoom = 37.7749, -122.4194, 6
-    fetch_and_output_bboxes(lat, lon, zoom)
-import requests
-from PIL import Image
-from io import BytesIO
 import numpy as np
 import torch
-from torchvision import transforms
-from monodepth2.networks import ResnetEncoder, DepthDecoder
-import matplotlib.pyplot as plt
-from tensorflow.keras.preprocessing.image import img_to_array
-
-# Fetch images from OpenAerialMap
-import requests
-import numpy as np
+import torch.nn as nn
+import torch.optim as optim
+import torchvision.transforms as transforms
+from torch.utils.data import DataLoader, Dataset
 from PIL import Image
+from io import BytesIO
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 import srtm
-from io import BytesIO
+
+# Constants
+NUM_IMAGES = 20
+IMAGE_DIR = "dataset"
+ZOOM_LEVELS = range(7, 11)
+LAT_RANGES = [(30, 60), (-30, 30)]
+LON_RANGES = [(-130, -60), (30, 150)]
+
+# Ensure image directory exists
+os.makedirs(IMAGE_DIR, exist_ok=True)
 
 # Initialize the SRTM data fetcher
-elevation_data = srtm.get_data()
-
-def get_elevation(lat, lon):
-    """Get elevation for the given latitude and longitude."""
-    try:
-        elevation = elevation_data.get_elevation(lat, lon)
-        return elevation if elevation is not None else "Elevation data not available."
-    except Exception as e:
-        return f"Error: {e}"
+elevation_data = srtm.get_srtm3()
 
 def lonlat_to_tilexy(lat, lon, zoom):
     """Convert latitude and longitude to tile x, y coordinates."""
@@ -135,8 +46,61 @@ def fetch_image_from_arcgis(lat, lon, zoom):
         print(f"Error fetching image: {e}")
         return None
 
+def preprocess_image(image):
+    """Preprocess image for model input."""
+    image = image.resize((256, 256))
+    image = np.array(image) / 255.0
+    return image
+
+def is_ocean_or_one_color(image):
+    """Check if the image is mostly ocean or mostly one color."""
+    try:
+        img_array = np.array(image)
+        
+        # Ensure image is in RGB format
+        if img_array.shape[2] != 3:
+            raise ValueError("Image is not in RGB format")
+        
+        # Blue detection: Count blue pixels where blue is significantly higher than both green and red
+        blue_channel = img_array[:, :, 2]
+        green_channel = img_array[:, :, 1]
+        red_channel = img_array[:, :, 0]
+        
+        is_blue = (blue_channel > 50) & (blue_channel > green_channel + 20) & (blue_channel > red_channel + 20)
+        blue_pixel_count = np.sum(is_blue)
+        total_pixel_count = img_array.shape[0] * img_array.shape[1]
+        blue_pixel_ratio = blue_pixel_count / total_pixel_count
+        
+        is_mostly_ocean = blue_pixel_ratio > 0.5  # Increased tolerance for blue pixels
+        
+        # Check for color uniformity
+        std_dev = np.std(img_array, axis=(0, 1))
+        is_one_color = np.all(std_dev < 30)  # Relaxed threshold for color uniformity
+
+        # Check for dominant single color
+        color_histograms = [np.histogram(img_array[:, :, i], bins=256, range=(0, 256))[0] for i in range(3)]
+        max_counts = [np.max(histogram) for histogram in color_histograms]
+        max_histogram_index = np.argmax(max_counts)
+        dominant_color_count = max_counts[max_histogram_index]
+        is_single_color = dominant_color_count > 0.75 * total_pixel_count  # Relaxed threshold for dominant color
+
+        return is_mostly_ocean or is_one_color or is_single_color
+    except Exception as e:
+        print(f"Error in is_ocean_or_one_color function: {e}")
+        return False
+
+def generate_random_lat_lon():
+    """Generate random latitude and longitude within specific land ranges."""
+    lat_range = random.choice(LAT_RANGES)
+    lon_range = random.choice(LON_RANGES)
+    
+    lat = random.uniform(lat_range[0], lat_range[1])
+    lon = random.uniform(lon_range[0], lon_range[1])
+    
+    return lat, lon
+
 def fetch_elevation_data(lat, lon, zoom, tile_size=256):
-    """Fetch elevation data for the tile area."""
+    """Fetch elevation data for the tile."""
     x, y = lonlat_to_tilexy(lat, lon, zoom)
     bounds = tile_to_bounds(x, y, zoom)
     lat_step = (bounds['n'] - bounds['s']) / tile_size
@@ -148,13 +112,18 @@ def fetch_elevation_data(lat, lon, zoom, tile_size=256):
             lat_point = bounds['s'] + i * lat_step
             lon_point = bounds['w'] + j * lon_step
             elevation = get_elevation(lat_point, lon_point)
-            if isinstance(elevation, (int, float)):
-                elevation_grid[i, j] = elevation
+            elevation_grid[i, j] = elevation
 
     return elevation_grid
 
+def get_elevation(lat, lon):
+    try:
+        elevation = elevation_data.get_elevation(lat, lon)
+        return elevation if elevation is not None else 0
+    except Exception as e:
+        return 0
+
 def tile_to_bounds(x, y, zoom):
-    """Convert tile x, y and zoom to geographic bounds."""
     n = 2 ** zoom
     lon_deg = x / n * 360 - 180
     lat_deg = np.degrees(np.arctan(np.sinh(np.pi * (1 - 2 * y / n))))
@@ -165,114 +134,150 @@ def tile_to_bounds(x, y, zoom):
         'n': np.degrees(np.arctan(np.sinh(np.pi * (1 - 2 * (y + 1) / n))))
     }
 
-def generate_heightmap_overlay(data):
-    """Create a heatmap overlay from elevation data."""
-    fig, ax = plt.subplots(figsize=(data.shape[1] / 100, data.shape[0] / 100), dpi=100)
+class ImageDataset(Dataset):
+    def __init__(self, folder_path, transform=None):
+        self.folder_path = folder_path
+        self.transform = transform
+        self.image_files = [f for f in os.listdir(folder_path) if f.endswith('.png')]
+
+    def __len__(self):
+        return len(self.image_files)
+
+    def __getitem__(self, idx):
+        img_name = self.image_files[idx]
+        img_path = os.path.join(self.folder_path, img_name)
+        image = Image.open(img_path)
+        lat, lon, zoom = map(float, img_name[:-4].split('_'))
+        heightmap = fetch_elevation_data(lat, lon, int(zoom))
+
+        if self.transform:
+            image = self.transform(image)
+
+        heightmap = torch.tensor(heightmap, dtype=torch.float32)
+        heightmap = heightmap.unsqueeze(0)  # Add channel dimension
+
+        return image, heightmap, (lat, lon, int(zoom))
+
+class CNN(nn.Module):
+    def __init__(self):
+        super(CNN, self).__init__()
+        self.encoder = nn.Sequential(
+            nn.Conv2d(3, 64, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.MaxPool2d(2, 2),
+            nn.Conv2d(64, 128, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.MaxPool2d(2, 2),
+            nn.Conv2d(128, 256, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.MaxPool2d(2, 2),
+        )
+        self.decoder = nn.Sequential(
+            nn.ConvTranspose2d(256, 128, kernel_size=2, stride=2),
+            nn.ReLU(),
+            nn.ConvTranspose2d(128, 64, kernel_size=2, stride=2),
+            nn.ReLU(),
+            nn.ConvTranspose2d(64, 1, kernel_size=2, stride=2),
+        )
+
+    def forward(self, x):
+        x = self.encoder(x)
+        x = self.decoder(x)
+        return x
+
+def train_model(model, dataloader, criterion, optimizer, num_epochs=10):
+    for epoch in range(num_epochs):
+        model.train()
+        running_loss = 0.0
+        for images, heightmaps, _ in dataloader:
+            images = images.to(device)
+            heightmaps = heightmaps.to(device)
+
+            optimizer.zero_grad()
+            outputs = model(images)
+            loss = criterion(outputs, heightmaps)
+            loss.backward()
+            optimizer.step()
+
+            running_loss += loss.item() * images.size(0)
+
+        epoch_loss = running_loss / len(dataloader.dataset)
+        print(f"Epoch {epoch+1}/{num_epochs}, Loss: {epoch_loss:.4f}")
+
+    return model
+
+def overlay_heightmap_on_image(image, heightmap_data):
+    """Overlay heightmap on image."""
+    fig, ax = plt.subplots(figsize=(heightmap_data.shape[1] / 100, heightmap_data.shape[0] / 100), dpi=100)
     cmap = plt.get_cmap('jet')
-    norm = mcolors.Normalize(vmin=np.min(data), vmax=np.max(data))
-    ax.imshow(data, cmap=cmap, norm=norm)
+    norm = mcolors.Normalize(vmin=np.min(heightmap_data), vmax=np.max(heightmap_data))
+    ax.imshow(heightmap_data, cmap=cmap, norm=norm)
     plt.axis('off')
 
     buf = BytesIO()
     plt.savefig(buf, format='png', bbox_inches='tight', pad_inches=0)
     plt.close(fig)
     buf.seek(0)
-    return Image.open(buf)
-
-def overlay_heightmap_on_image(image, heightmap_data):
-    """Overlay heightmap on the provided image."""
-    heightmap_overlay = generate_heightmap_overlay(heightmap_data)
+    heightmap_overlay = Image.open(buf)
     heightmap_overlay = heightmap_overlay.resize(image.size, Image.Resampling.BOX)
     combined = Image.blend(image.convert('RGBA'), heightmap_overlay.convert('RGBA'), alpha=0.5)
     return combined
 
-def is_ocean(image):
-    """Check if the image is mostly ocean based on common ocean colors."""
-    ocean_colors = [(0, 0, 128), (0, 105, 148), (0, 149, 182)]
-    image = image.convert("RGB")
-    for count, color in image.getcolors(image.size[0] * image.size[1]):
-        if color in ocean_colors:
-            return True
-    return False
-
-def fetch_and_combine_images(lat, lon, zoom):
-    """Fetch map image, get elevation data, and combine them."""
-    image = fetch_image_from_arcgis(lat, lon, zoom)
-    if image:
-        heightmap_data = fetch_elevation_data(lat, lon, zoom)
-        combined_image = overlay_heightmap_on_image(image, heightmap_data)
-        if is_ocean(image):
-            print("The image is mostly ocean.")
-        else:
-            combined_image.show()
-    else:
-        print("Failed to fetch the map image.")
-
-# Example usage
-if __name__ == "__main__":
-    lat, lon, zoom = 37.7749, -122.4194, 6
-    fetch_and_combine_images(lat, lon, zoom)
-
-images = []
-for bbox in bboxes:
-    img = fetch_aerial_image(bbox)
-    if img is not None:
-        images.append(img)
-
-print(f"Fetched {len(images)} images.")
-
-# Preprocess images
-def preprocess_image(image):
-    image = image.resize((256, 256))
-    image = img_to_array(image)
-    image = image / 255.0
-    return image
-
-preprocessed_images = np.array([preprocess_image(img) for img in images])
-
-# Load pre-trained Monodepth2 model
+# Set device
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-encoder = ResnetEncoder(18, False)
-depth_decoder = DepthDecoder(num_ch_enc=encoder.num_ch_enc)
 
-encoder_path = 'monodepth2/models/mono+stereo_640x192/encoder.pth'
-depth_decoder_path = 'monodepth2/models/mono+stereo_640x192/depth.pth'
+# Hyperparameters
+batch_size = 8
+learning_rate = 0.001
+num_epochs = 10
 
-encoder.load_state_dict(torch.load(encoder_path, map_location=device))
-depth_decoder.load_state_dict(torch.load(depth_decoder_path, map_location=device))
+# Image transformations
+transform = transforms.Compose([
+    transforms.Resize((256, 256)),
+    transforms.ToTensor()
+])
 
-encoder.to(device)
-encoder.eval()
-depth_decoder.to(device)
-depth_decoder.eval()
+# Load dataset
+dataset = ImageDataset(folder_path=IMAGE_DIR, transform=transform)
+dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
-# Predict depth
-def predict_depth(image):
-    transform = transforms.ToTensor()
-    input_image = transform(image).unsqueeze(0).to(device)
+# Initialize model, loss function, and optimizer
+model = CNN().to(device)
+criterion = nn.MSELoss()
+optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+
+# Train the model
+trained_model = train_model(model, dataloader, criterion, optimizer, num_epochs)
+
+# Example usage to fetch, predict, and verify
+if __name__ == "__main__":
+    last_image, _, last_coords = dataset[-1]
+    last_image = last_image.unsqueeze(0).to(device)
+    
     with torch.no_grad():
-        features = encoder(input_image)
-        outputs = depth_decoder(features)
-        disp = outputs[("disp", 0)]
-        depth_map = disp.squeeze().cpu().numpy()
-    return depth_map
+        model.eval()
+        predicted_heightmap = model(last_image).squeeze().cpu().numpy()
+    
+    lat, lon, zoom = last_coords
+    true_heightmap = fetch_elevation_data(lat, lon, zoom)
+    
+    image = Image.open(os.path.join(IMAGE_DIR, f"{lat}_{lon}_{zoom}.png"))
+    combined_image = overlay_heightmap_on_image(image, predicted_heightmap)
+    combined_image.show()
+    print(f"True heightmap mean elevation: {np.mean(true_heightmap):.2f} meters")
 
-depth_maps = [predict_depth(img) for img in preprocessed_images]
+# Fetch and save images
+def save_images(num_images, image_dir):
+    saved_images = 0
+    while saved_images < num_images:
+        lat, lon = generate_random_lat_lon()
+        zoom = random.randint(7, 10)
+        image = fetch_image_from_arcgis(lat, lon, zoom)
+        if image and not is_ocean_or_one_color(image):
+            image_path = os.path.join(image_dir, f"{lat}_{lon}_{zoom}.png")
+            image.save(image_path)
+            saved_images += 1
+            print(f"Saved image {saved_images}/{num_images} at {image_path}")
 
-# Visualize depth maps
-def visualize_depth_maps(images, depth_maps):
-    num_images = len(images)
-    plt.figure(figsize=(15, num_images * 5))
-    for i in range(num_images):
-        plt.subplot(num_images, 2, i * 2 + 1)
-        plt.imshow(images[i])
-        plt.title("Aerial Image")
-        plt.axis('off')
-
-        plt.subplot(num_images, 2, i * 2 + 2)
-        plt.imshow(depth_maps[i], cmap='plasma')
-        plt.title("Predicted Height Map")
-        plt.axis('off')
-    plt.show()
-
-visualize_depth_maps(images, depth_maps)
+save_images(NUM_IMAGES, IMAGE_DIR)
+print("Finished saving images.")
