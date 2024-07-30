@@ -13,17 +13,14 @@ import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 import srtm
 
-# Constants
 NUM_IMAGES = 20
 IMAGE_DIR = "dataset"
 ZOOM_LEVELS = range(7, 11)
 LAT_RANGES = [(30, 60), (-30, 30)]
 LON_RANGES = [(-130, -60), (30, 150)]
 
-# Ensure image directory exists
 os.makedirs(IMAGE_DIR, exist_ok=True)
 
-# Initialize the SRTM data fetcher
 elevation_data = srtm.get_srtm3()
 
 def lonlat_to_tilexy(lat, lon, zoom):
@@ -57,11 +54,9 @@ def is_ocean_or_one_color(image):
     try:
         img_array = np.array(image)
         
-        # Ensure image is in RGB format
         if img_array.shape[2] != 3:
             raise ValueError("Image is not in RGB format")
         
-        # Blue detection: Count blue pixels where blue is significantly higher than both green and red
         blue_channel = img_array[:, :, 2]
         green_channel = img_array[:, :, 1]
         red_channel = img_array[:, :, 0]
@@ -71,18 +66,17 @@ def is_ocean_or_one_color(image):
         total_pixel_count = img_array.shape[0] * img_array.shape[1]
         blue_pixel_ratio = blue_pixel_count / total_pixel_count
         
-        is_mostly_ocean = blue_pixel_ratio > 0.5  # Increased tolerance for blue pixels
+        is_mostly_ocean = blue_pixel_ratio > 0.5  
         
-        # Check for color uniformity
         std_dev = np.std(img_array, axis=(0, 1))
-        is_one_color = np.all(std_dev < 30)  # Relaxed threshold for color uniformity
+        is_one_color = np.all(std_dev < 30)  
 
-        # Check for dominant single color
+
         color_histograms = [np.histogram(img_array[:, :, i], bins=256, range=(0, 256))[0] for i in range(3)]
         max_counts = [np.max(histogram) for histogram in color_histograms]
         max_histogram_index = np.argmax(max_counts)
         dominant_color_count = max_counts[max_histogram_index]
-        is_single_color = dominant_color_count > 0.75 * total_pixel_count  # Relaxed threshold for dominant color
+        is_single_color = dominant_color_count > 0.75 * total_pixel_count  
 
         return is_mostly_ocean or is_one_color or is_single_color
     except Exception as e:
@@ -223,15 +217,12 @@ def overlay_heightmap_on_image(image, heightmap_data):
     combined = Image.blend(image.convert('RGBA'), heightmap_overlay.convert('RGBA'), alpha=0.5)
     return combined
 
-# Set device
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# Hyperparameters
 batch_size = 8
 learning_rate = 0.001
 num_epochs = 10
 
-# Image transformations
 transform = transforms.Compose([
     transforms.Resize((256, 256)),
     transforms.ToTensor()
@@ -241,15 +232,12 @@ transform = transforms.Compose([
 dataset = ImageDataset(folder_path=IMAGE_DIR, transform=transform)
 dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
-# Initialize model, loss function, and optimizer
 model = CNN().to(device)
 criterion = nn.MSELoss()
 optimizer = optim.Adam(model.parameters(), lr=learning_rate)
 
-# Train the model
 trained_model = train_model(model, dataloader, criterion, optimizer, num_epochs)
 
-# Example usage to fetch, predict, and verify
 if __name__ == "__main__":
     last_image, _, last_coords = dataset[-1]
     last_image = last_image.unsqueeze(0).to(device)
@@ -266,7 +254,6 @@ if __name__ == "__main__":
     combined_image.show()
     print(f"True heightmap mean elevation: {np.mean(true_heightmap):.2f} meters")
 
-# Fetch and save images
 def save_images(num_images, image_dir):
     saved_images = 0
     while saved_images < num_images:

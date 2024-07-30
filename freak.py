@@ -6,7 +6,6 @@ import matplotlib.colors as mcolors
 import srtm
 from io import BytesIO
 
-# Initialize the SRTM data fetcher
 elevation_data = srtm.get_data()
 
 def get_elevation(lat, lon):
@@ -110,7 +109,6 @@ def fetch_and_combine_images(lat, lon, zoom):
     else:
         print("Failed to fetch the map image.")
 
-# Example usage
 if __name__ == "__main__":
     lat, lon, zoom = 37.7749, -122.4194, 6
     fetch_and_combine_images(lat, lon, zoom)

@@ -1,3 +1,4 @@
+import os
 import random
 import requests
 import numpy as np
@@ -12,13 +13,14 @@ import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 import srtm
 
-# Constants
-NUM_IMAGES = 2000
+NUM_IMAGES = 1000
 ZOOM_LEVELS = range(7, 11)
 LAT_RANGES = [(30, 60), (-30, 30)]
 LON_RANGES = [(-130, -60), (30, 150)]
+IMAGE_DIR = "new_data"
 
-# Initialize the SRTM data fetcher
+os.makedirs(IMAGE_DIR, exist_ok=True)
+
 elevation_data = srtm.get_data()
 
 def lonlat_to_tilexy(lat, lon, zoom):
@@ -51,12 +53,10 @@ def is_ocean_or_one_color(image):
     """Check if the image is mostly ocean or mostly one color."""
     try:
         img_array = np.array(image)
-        
-        # Ensure image is in RGB format
+
         if img_array.shape[2] != 3:
             raise ValueError("Image is not in RGB format")
-        
-        # Blue detection: Count blue pixels where blue is significantly higher than both green and red
+
         blue_channel = img_array[:, :, 2]
         green_channel = img_array[:, :, 1]
         red_channel = img_array[:, :, 0]
@@ -66,18 +66,17 @@ def is_ocean_or_one_color(image):
         total_pixel_count = img_array.shape[0] * img_array.shape[1]
         blue_pixel_ratio = blue_pixel_count / total_pixel_count
         
-        is_mostly_ocean = blue_pixel_ratio > 0.5  # Increased tolerance for blue pixels
-        
-        # Check for color uniformity
-        std_dev = np.std(img_array, axis=(0, 1))
-        is_one_color = np.all(std_dev < 30)  # Relaxed threshold for color uniformity
+        is_mostly_ocean = blue_pixel_ratio > 0.5  
 
-        # Check for dominant single color
+        std_dev = np.std(img_array, axis=(0, 1))
+        is_one_color = np.all(std_dev < 30) 
+
+
         color_histograms = [np.histogram(img_array[:, :, i], bins=256, range=(0, 256))[0] for i in range(3)]
         max_counts = [np.max(histogram) for histogram in color_histograms]
         max_histogram_index = np.argmax(max_counts)
         dominant_color_count = max_counts[max_histogram_index]
-        is_single_color = dominant_color_count > 0.75 * total_pixel_count  # Relaxed threshold for dominant color
+        is_single_color = dominant_color_count > 0.75 * total_pixel_count  
 
         return is_mostly_ocean or is_one_color or is_single_color
     except Exception as e:
@@ -214,21 +213,22 @@ def overlay_heightmap_on_image(image, heightmap_data):
     combined = Image.blend(Image.fromarray((image * 255).astype(np.uint8)).convert('RGBA'), heightmap_overlay.convert('RGBA'), alpha=0.5)
     return combined
 
-# Set device
+def save_image_with_heightmap(image, heightmap, filename):
+    """Save the image with the heightmap overlay."""
+    combined_image = overlay_heightmap_on_image(image, heightmap)
+    combined_image.save(filename)
+
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# Hyperparameters
 batch_size = 8
 learning_rate = 0.001
 num_epochs = 10
 
-# Image transformations
 transform = transforms.Compose([
     transforms.Resize((256, 256)),
     transforms.ToTensor()
 ])
 
-# Fetch images and create dataset
 images = []
 for _ in range(NUM_IMAGES):
     lat, lon = generate_random_lat_lon()
@@ -240,27 +240,20 @@ for _ in range(NUM_IMAGES):
 dataset = ImageDataset(images=images, transform=transform)
 dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
-# Initialize model, loss function, and optimizer
 model = CNN().to(device)
 criterion = nn.MSELoss()
 optimizer = optim.Adam(model.parameters(), lr=learning_rate)
 
-# Train the model
 trained_model = train_model(model, dataloader, criterion, optimizer, num_epochs)
 
-# Example usage to fetch, predict, and verify
 if __name__ == "__main__":
-    last_image, _, last_coords = dataset[-1]
-    last_image = last_image.unsqueeze(0).to(device)
-    
-    with torch.no_grad():
-        model.eval()
-        predicted_heightmap = model(last_image).squeeze().cpu().numpy()
-    
-    lat, lon, zoom = last_coords
-    true_heightmap = fetch_elevation_data(lat, lon, zoom)
-    
-    combined_image = overlay_heightmap_on_image(last_image.squeeze().cpu().numpy().transpose(1, 2, 0), predicted_heightmap)
-    plt.imshow(combined_image)
-    plt.show()
-    print(f"True heightmap mean elevation: {np.mean(true_heightmap):.2f} meters")
+    for i, (image, _, coords) in enumerate(dataset):
+        image = image.unsqueeze(0).to(device)
+        with torch.no_grad():
+            model.eval()
+            predicted_heightmap = model(image).squeeze().cpu().numpy()
+
+        lat, lon, zoom = coords
+        filename = os.path.join(IMAGE_DIR, f"{lat}_{lon}_{zoom}_combined.png")
+        save_image_with_heightmap(image.squeeze().cpu().numpy().transpose(1, 2, 0), predicted_heightmap, filename)
+        print(f"Saved combined image: {filename}")
