@@ -84,4 +84,8 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## Contact
 
-For any inquiries, please contact the project maintainer at zyb2003@columbia.edu or zhumazhanbalapanov@gmail.com.
+For any inquiries, please contact the project maintainer at zyb2003@columbia.edu or zhumazhanbalapanov@gmail.com. 
+
+## Thanks to...
+
+Solal, Arthur and Anay contributed immensely to the project, thanks you very much guys! ajb2371@columbia.edu, sdp2170@columbia.edu, ac5683@columbia.edu
