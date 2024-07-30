@@ -58,7 +58,7 @@ ColumbiaAerial is a project aimed at fetching satellite images and their corresp
 
 ## Code Explanation
 
-### Main Script (`rizz.py`)
+### Main Script (`convert.py`)
 
 - **Constants and Initialization**: Defines constants for the number of images, zoom levels, latitude and longitude ranges. Ensures the `new_data` directory exists for saving output images. Initializes the SRTM data fetcher for elevation data.
 
