@@ -53,7 +53,7 @@ ColumbiaAerial is a project aimed at fetching satellite images and their corresp
 3. Run the script to fetch images, train the model, and save the combined images:
 
     ```bash
-    python rizz.py
+    python convert.py
     ```
 
 ## Code Explanation
